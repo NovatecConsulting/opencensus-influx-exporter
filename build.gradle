@@ -1,0 +1,77 @@
+buildscript {
+    repositories {
+        jcenter()
+    }
+    dependencies {
+        classpath 'com.bmuschko:gradle-nexus-plugin:2.3.1'
+    }
+}
+apply plugin: 'com.bmuschko.nexus'
+apply plugin: 'java'
+apply plugin: 'maven'
+
+group 'rocks.inspectit'
+version '1.0'
+
+sourceCompatibility = 1.8
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    compileOnly 'org.projectlombok:lombok:1.18.4'
+    annotationProcessor 'org.projectlombok:lombok:1.18.4'
+
+    compileOnly 'io.opencensus:opencensus-api:0.24.0'
+    implementation 'org.slf4j:slf4j-api:1.7.30'
+    implementation 'org.influxdb:influxdb-java:2.15'
+
+    testImplementation 'org.slf4j:slf4j-api:1.7.30'
+    testImplementation 'io.opencensus:opencensus-api:0.24.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.6.0'
+    testImplementation 'org.mockito:mockito-core:3.2.4'
+    testImplementation 'org.assertj:assertj-core:3.14.0'
+}
+
+modifyPom {
+    project {
+        name 'OpenCensus Inflix Exporter'
+        description 'Exporter for directly pushing metrics to InfluxDB via OpenCensus.'
+        url 'https://github.com/NovatecConsulting/opencensus-influx-exporter'
+        
+        licenses {
+            license {
+                name 'The Apache Software License, Version 2.0'
+                url 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                distribution 'repo'
+            }
+        }
+
+        scm {
+            url "https://github.com/NovatecConsulting/opencensus-influx-exporter"
+            connection "scm:git:https://github.com/NovatecConsulting/opencensus-influx-exporter.git"
+            developerConnection "scm:git:git@github.com:NovatecConsulting/opencensus-influx-exporter.git"
+        }
+
+        developers {
+            developer {
+                id 'inspectit-team'
+                name 'The inspectIT Development Team'
+                organizationUrl 'http://www.inspectit.rocks'
+            }
+        }
+    }
+}
+
+extraArchive {
+    sources = true
+    tests = true
+    javadoc = true
+}
+
+nexus {
+    sign = true
+    repositoryUrl = 'https://oss.sonatype.org/service/local/staging/deploy/maven2/'
+    snapshotRepositoryUrl = 'https://oss.sonatype.org/content/repositories/snapshots'
+}
