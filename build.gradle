@@ -6,11 +6,13 @@ buildscript {
         classpath 'com.bmuschko:gradle-nexus-plugin:2.3.1'
     }
 }
-apply plugin: 'com.bmuschko.nexus'
+
 apply plugin: 'java'
 apply plugin: 'maven'
+apply plugin: 'signing'
 
 group 'rocks.inspectit'
+archivesBaseName = "${rootProject.name}"
 version '1.0'
 
 sourceCompatibility = 1.8
@@ -34,44 +36,64 @@ dependencies {
     testImplementation 'org.assertj:assertj-core:3.14.0'
 }
 
-modifyPom {
-    project {
-        name 'OpenCensus Inflix Exporter'
-        description 'Exporter for directly pushing metrics to InfluxDB via OpenCensus.'
-        url 'https://github.com/NovatecConsulting/opencensus-influx-exporter'
-        
-        licenses {
-            license {
-                name 'The Apache Software License, Version 2.0'
-                url 'http://www.apache.org/licenses/LICENSE-2.0.txt'
-                distribution 'repo'
+task javadocJar(type: Jar) {
+    classifier = 'javadoc'
+    from javadoc
+}
+
+task sourcesJar(type: Jar) {
+    classifier = 'sources'
+    from sourceSets.main.allSource
+}
+
+artifacts {
+    archives javadocJar, sourcesJar
+}
+
+signing {
+    sign configurations.archives
+}
+
+uploadArchives {
+    repositories {
+        mavenDeployer {
+            beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
+
+            repository(url: "https://oss.sonatype.org/service/local/staging/deploy/maven2/") {
+                authentication(userName: ossrhUsername, password: ossrhPassword)
             }
-        }
 
-        scm {
-            url "https://github.com/NovatecConsulting/opencensus-influx-exporter"
-            connection "scm:git:https://github.com/NovatecConsulting/opencensus-influx-exporter.git"
-            developerConnection "scm:git:git@github.com:NovatecConsulting/opencensus-influx-exporter.git"
-        }
+            snapshotRepository(url: "https://oss.sonatype.org/content/repositories/snapshots/") {
+                authentication(userName: ossrhUsername, password: ossrhPassword)
+            }
 
-        developers {
-            developer {
-                id 'inspectit-team'
-                name 'The inspectIT Development Team'
-                organizationUrl 'http://www.inspectit.rocks'
+            pom.project {
+                name 'OpenCensus InfluxDB Exporter'
+                packaging 'jar'
+                description 'Exporter for directly pushing metrics to InfluxDB via OpenCensus.'
+                url 'https://github.com/NovatecConsulting/opencensus-influx-exporter'
+
+                scm {
+                    url "https://github.com/NovatecConsulting/opencensus-influx-exporter"
+                    connection "scm:git:https://github.com/NovatecConsulting/opencensus-influx-exporter.git"
+                    developerConnection "scm:git:git@github.com:NovatecConsulting/opencensus-influx-exporter.git"
+                }
+
+                developers {
+                    developer {
+                        id 'inspectit-team'
+                        name 'The inspectIT Development Team'
+                        organizationUrl 'http://www.inspectit.rocks'
+                    }
+                }
+
+                licenses {
+                    license {
+                        name 'The Apache License, Version 2.0'
+                        url 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
             }
         }
     }
-}
-
-extraArchive {
-    sources = true
-    tests = true
-    javadoc = true
-}
-
-nexus {
-    sign = true
-    repositoryUrl = 'https://oss.sonatype.org/service/local/staging/deploy/maven2/'
-    snapshotRepositoryUrl = 'https://oss.sonatype.org/content/repositories/snapshots'
 }
