@@ -1,31 +1,26 @@
 package rocks.inspectit.opencensus.influx;
 
-import io.opencensus.common.Timestamp;
-import io.opencensus.implcore.stats.ViewManagerImpl;
-import io.opencensus.metrics.export.*;
+import com.google.common.collect.ImmutableMap;
 import io.opencensus.stats.Aggregation;
+import io.opencensus.stats.BucketBoundaries;
 import io.opencensus.stats.Measure;
-import io.opencensus.stats.Stats;
-import io.opencensus.stats.View;
-import io.opencensus.tags.TagContext;
-import io.opencensus.tags.TagKey;
-import io.opencensus.tags.TagValue;
-import io.opencensus.tags.Tags;
 import org.influxdb.InfluxDB;
 import org.influxdb.dto.BatchPoints;
-import org.junit.jupiter.api.BeforeAll;
+import org.influxdb.dto.Point;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import rocks.inspectit.opencensus.influx.utils.OpenCensusDummyData;
+import rocks.inspectit.opencensus.influx.utils.PointUtils;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
 import static org.mockito.Mockito.*;
+import static rocks.inspectit.opencensus.influx.utils.OpenCensusUtils.*;
 
 public class InfluxExporterTest {
 
@@ -33,85 +28,14 @@ public class InfluxExporterTest {
 
     private InfluxDB influxDB;
 
-    @BeforeAll
-    public static void before() {
-        TagKey KEY_ERROR = TagKey.create("myTag");
-        TagKey KEY_ERROR2 = TagKey.create("anotherTag");
-        Measure.MeasureLong M_LINE_LENGTHS = Measure.MeasureLong.create("testmetric/lines_in", "The distribution of line lengths", "By");
-
-        View view = View.create(View.Name.create("testmetric/lines_in/count"), "empty", M_LINE_LENGTHS, Aggregation.Count.create(), Arrays.asList(KEY_ERROR, KEY_ERROR2));
-
-        Stats.getViewManager().registerView(view);
-
-        TagContext tctx = Tags.getTagger().emptyBuilder().putLocal(KEY_ERROR, TagValue.create("marius")).build();
-        Stats.getStatsRecorder().newMeasureMap().put(M_LINE_LENGTHS, 1337L).record(tctx);
-
-        TagContext tctx2 = Tags.getTagger().emptyBuilder().putLocal(KEY_ERROR, TagValue.create("test123")).putLocal(KEY_ERROR2, TagValue.create("xxx")).build();
-        Stats.getStatsRecorder().newMeasureMap().put(M_LINE_LENGTHS, 1337L).record(tctx2);
-    }
-
     @BeforeEach
     public void beforeTest() {
         influxDB = mock(InfluxDB.class);
 
         exporter = new InfluxExporter("", "", "", "", "", false);
         exporter.setInflux(influxDB);
-    }
 
-    public void injectMetrics(Metric metric) {
-        exporter.setMetricProducerSupplier(() -> Collections.singleton(new MetricProducer() {
-            @Override
-            public Collection<Metric> getMetrics() {
-                return Collections.singleton(metric);
-            }
-        }));
-    }
-
-    public void injectMetrics(Collection<Metric> metrics) {
-        exporter.setMetricProducerSupplier(() -> Collections.singleton(new MetricProducer() {
-            @Override
-            public Collection<Metric> getMetrics() {
-                return metrics;
-            }
-        }));
-    }
-
-    public void injectView(View... views) {
-        Set<View> viewSet = new HashSet<>(Arrays.asList(views));
-        injectView(viewSet);
-    }
-
-    public void injectData(OpenCensusDummyData data) {
-        Collection<Metric> metrics = data.getMetrics();
-        exporter.setMetricProducerSupplier(() -> Collections.singleton(new MetricProducer() {
-            @Override
-            public Collection<Metric> getMetrics() {
-                return new ArrayList<>(metrics);
-            }
-        }));
-    }
-
-    public void injectView( Set<View> views ) {
-        exporter.setViewSupplier(() -> views);
-    }
-
-    public Metric createMetric(String name, MetricDescriptor.Type type) {
-        return createMetric(name, type, null);
-    }
-
-    public Metric createMetric(String name, MetricDescriptor.Type type, Long number) {
-        MetricDescriptor metricDescriptor = MetricDescriptor.create(name, "Description", "unit", type, Collections.emptyList());
-        TimeSeries timeSeries = TimeSeries.create(Collections.emptyList());
-
-        if (number != null) {
-            Value value = Value.longValue(1L);
-            Timestamp timestamp = Timestamp.fromMillis(1586356695608L);
-            Point point = Point.create(value, timestamp);
-
-            timeSeries = timeSeries.setPoint(point);
-        }
-
-        return Metric.createWithOneTimeSeries(metricDescriptor, timeSeries);
+        resetOpenCensus();
     }
 
     @Nested
@@ -119,7 +43,6 @@ public class InfluxExporterTest {
 
         @Test
         public void noMetrics() {
-
             exporter.export();
 
             verifyNoInteractions(influxDB);
@@ -127,8 +50,8 @@ public class InfluxExporterTest {
 
         @Test
         public void noData() {
-            Metric dummyMetric = createMetric("dummyMetric", MetricDescriptor.Type.CUMULATIVE_INT64);
-            injectMetrics(dummyMetric);
+            Measure.MeasureLong measure = createLongMeasure("test_measure");
+            createView(measure, "test_measure/count", Aggregation.Count.create(), Collections.emptyList());
 
             exporter.export();
 
@@ -140,27 +63,10 @@ public class InfluxExporterTest {
         }
 
         @Test
-        public void writeData() throws Exception {
-            OpenCensusDummyData dummyData = new OpenCensusDummyData();
-            OpenCensusDummyData.DummyView dummyView = dummyData.addLongView("dummyMetric", "dummyMetric/count", Aggregation.Count.create(), MetricDescriptor.Type.CUMULATIVE_INT64, Collections.singletonList("testTag"));
-            dummyView.setLongData(Collections.singletonList("testValue"), 1L);
-            dummyView.setLongData(Collections.singletonList("testValue2"), 10L);
-
-            //injectMetrics(dummyData.getMetrics());
-            //injectView(dummyData.getViews());
-
-            Constructor<?>[] constructors = Class.forName("io.opencensus.implcore.stats.MeasureToViewMap").getDeclaredConstructors();
-            Constructor<?> constructor = constructors[0];
-            constructor.setAccessible(true);
-            Object measuretoViewMap = constructor.newInstance();
-
-            Field statsManagerField = ViewManagerImpl.class.getDeclaredField("statsManager");
-            statsManagerField.setAccessible(true);
-            Object statsManager = statsManagerField.get(Stats.getViewManager());
-
-            Field measureToViewMapField = statsManager.getClass().getDeclaredField("measureToViewMap");
-            measureToViewMapField.setAccessible(true);
-            measureToViewMapField.set(statsManager, measuretoViewMap);
+        public void writeSingleData() {
+            Measure measure = createLongMeasure("test_measure");
+            createView(measure, "test_measure/count", Aggregation.Count.create(), Collections.emptyList());
+            recordData(measure, 100L, Collections.emptyMap());
 
             exporter.export();
 
@@ -168,7 +74,121 @@ public class InfluxExporterTest {
             verify(influxDB).write(pointsCaptor.capture());
             verifyNoMoreInteractions(influxDB);
 
-            assertThat(pointsCaptor.getValue().getPoints()).isEmpty();
+            List<Point> points = pointsCaptor.getValue().getPoints();
+            assertThat(points).hasSize(1);
+
+            Point point = points.get(0);
+            assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+            assertThat(PointUtils.getField(point)).containsExactly(entry("count", 1L));
+            assertThat(PointUtils.getTags(point)).isEmpty();
+        }
+
+        @Test
+        public void successiveExports() {
+            Measure measure = createLongMeasure("test_measure");
+            createView(measure, "test_measure/count", Aggregation.Count.create(), Collections.emptyList());
+            recordData(measure, 100L, Collections.emptyMap());
+
+            exporter.export();
+
+            recordData(measure, 100L, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB, times(2)).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<BatchPoints> values = pointsCaptor.getAllValues();
+            assertThat(values).hasSize(2);
+
+            for (int i = 0; i < 2; i++) {
+                BatchPoints batchPoints = values.get(i);
+                long expected = i + 1L;
+
+                List<Point> points = batchPoints.getPoints();
+                assertThat(points).hasSize(1);
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("count", expected));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            }
+        }
+
+        @Test
+        public void writeDataWithTags() {
+            Measure measure = createLongMeasure("test_measure");
+            createView(measure, "test_measure/value", Aggregation.Sum.create(), Arrays.asList("my_tag", "another_tag"));
+            recordData(measure, 100L, ImmutableMap.of("my_tag", "my_first_value", "another_tag", "my_second_value"));
+            recordData(measure, 200L, Collections.singletonMap("another_tag", "my_second_value"));
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<Point> points = pointsCaptor.getValue().getPoints();
+            assertThat(points).hasSize(2);
+
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value", 100L));
+                assertThat(PointUtils.getTags(point)).containsOnly(
+                        entry("my_tag", "my_first_value"),
+                        entry("another_tag", "my_second_value"));
+            });
+
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value", 200L));
+                assertThat(PointUtils.getTags(point)).containsOnly(entry("another_tag", "my_second_value"));
+            });
+        }
+
+        @Test
+        public void writeDistributionData() {
+            Aggregation distribution = Aggregation.Distribution.create(BucketBoundaries.create(
+                    Arrays.asList(0.0, 500.0, 1000.0)
+            ));
+
+            Measure measure = createLongMeasure("test_measure");
+            createView(measure, "test_measure/value", distribution, Collections.emptyList());
+            recordData(measure, 50L, Collections.emptyMap());
+            recordData(measure, 1000L, Collections.emptyMap());
+            recordData(measure, 1337L, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<Point> points = pointsCaptor.getValue().getPoints();
+            assertThat(points).hasSize(4);
+
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsOnly(
+                        entry("value_count", 3L),
+                        entry("value_sum", 2387.0D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            });
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value_bucket", 1L));
+                assertThat(PointUtils.getTags(point)).containsExactly(entry("bucket", "(-Inf,500.0]"));
+            });
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value_bucket", 0L));
+                assertThat(PointUtils.getTags(point)).containsExactly(entry("bucket", "(500.0,1000.0]"));
+            });
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value_bucket", 2L));
+                assertThat(PointUtils.getTags(point)).containsExactly(entry("bucket", "(1000.0,+Inf)"));
+            });
         }
     }
 }

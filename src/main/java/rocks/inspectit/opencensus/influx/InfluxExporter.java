@@ -88,8 +88,7 @@ public class InfluxExporter implements AutoCloseable {
         export(metrics);
     }
 
-    @VisibleForTesting
-    synchronized void export(Collection<Metric> metrics) {
+    private synchronized void export(Collection<Metric> metrics) {
         if (metrics.size() <= 0) {
             return;
         }

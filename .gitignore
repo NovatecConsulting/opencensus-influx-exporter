@@ -9,3 +9,4 @@
 *.ipr
 */out/
 /components/*/out/
+out/
