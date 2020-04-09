@@ -1,145 +1,174 @@
 package rocks.inspectit.opencensus.influx;
 
 import io.opencensus.common.Timestamp;
-import io.opencensus.metrics.LabelKey;
-import io.opencensus.metrics.LabelValue;
-import io.opencensus.metrics.export.MetricDescriptor;
+import io.opencensus.implcore.stats.ViewManagerImpl;
+import io.opencensus.metrics.export.*;
+import io.opencensus.stats.Aggregation;
 import io.opencensus.stats.Measure;
+import io.opencensus.stats.Stats;
 import io.opencensus.stats.View;
+import io.opencensus.tags.TagContext;
+import io.opencensus.tags.TagKey;
+import io.opencensus.tags.TagValue;
+import io.opencensus.tags.Tags;
+import org.influxdb.InfluxDB;
+import org.influxdb.dto.BatchPoints;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
+import org.mockito.ArgumentCaptor;
+import rocks.inspectit.opencensus.influx.utils.OpenCensusDummyData;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 public class InfluxExporterTest {
 
-    private InfluxExporter exporter = new InfluxExporter("","","","","",false);
+    private InfluxExporter exporter;
 
-    @Nested
-    class GetMeasurementName {
+    private InfluxDB influxDB;
 
-        @Test
-        void verifyNameSanitizationWithoutView() {
-            String result = exporter.getMeasurementName("$%    I am$SPEcial$", null);
+    @BeforeAll
+    public static void before() {
+        TagKey KEY_ERROR = TagKey.create("myTag");
+        TagKey KEY_ERROR2 = TagKey.create("anotherTag");
+        Measure.MeasureLong M_LINE_LENGTHS = Measure.MeasureLong.create("testmetric/lines_in", "The distribution of line lengths", "By");
 
-            assertThat(result).isEqualTo("i_am_special");
+        View view = View.create(View.Name.create("testmetric/lines_in/count"), "empty", M_LINE_LENGTHS, Aggregation.Count.create(), Arrays.asList(KEY_ERROR, KEY_ERROR2));
+
+        Stats.getViewManager().registerView(view);
+
+        TagContext tctx = Tags.getTagger().emptyBuilder().putLocal(KEY_ERROR, TagValue.create("marius")).build();
+        Stats.getStatsRecorder().newMeasureMap().put(M_LINE_LENGTHS, 1337L).record(tctx);
+
+        TagContext tctx2 = Tags.getTagger().emptyBuilder().putLocal(KEY_ERROR, TagValue.create("test123")).putLocal(KEY_ERROR2, TagValue.create("xxx")).build();
+        Stats.getStatsRecorder().newMeasureMap().put(M_LINE_LENGTHS, 1337L).record(tctx2);
+    }
+
+    @BeforeEach
+    public void beforeTest() {
+        influxDB = mock(InfluxDB.class);
+
+        exporter = new InfluxExporter("", "", "", "", "", false);
+        exporter.setInflux(influxDB);
+    }
+
+    public void injectMetrics(Metric metric) {
+        exporter.setMetricProducerSupplier(() -> Collections.singleton(new MetricProducer() {
+            @Override
+            public Collection<Metric> getMetrics() {
+                return Collections.singleton(metric);
+            }
+        }));
+    }
+
+    public void injectMetrics(Collection<Metric> metrics) {
+        exporter.setMetricProducerSupplier(() -> Collections.singleton(new MetricProducer() {
+            @Override
+            public Collection<Metric> getMetrics() {
+                return metrics;
+            }
+        }));
+    }
+
+    public void injectView(View... views) {
+        Set<View> viewSet = new HashSet<>(Arrays.asList(views));
+        injectView(viewSet);
+    }
+
+    public void injectData(OpenCensusDummyData data) {
+        Collection<Metric> metrics = data.getMetrics();
+        exporter.setMetricProducerSupplier(() -> Collections.singleton(new MetricProducer() {
+            @Override
+            public Collection<Metric> getMetrics() {
+                return new ArrayList<>(metrics);
+            }
+        }));
+    }
+
+    public void injectView( Set<View> views ) {
+        exporter.setViewSupplier(() -> views);
+    }
+
+    public Metric createMetric(String name, MetricDescriptor.Type type) {
+        return createMetric(name, type, null);
+    }
+
+    public Metric createMetric(String name, MetricDescriptor.Type type, Long number) {
+        MetricDescriptor metricDescriptor = MetricDescriptor.create(name, "Description", "unit", type, Collections.emptyList());
+        TimeSeries timeSeries = TimeSeries.create(Collections.emptyList());
+
+        if (number != null) {
+            Value value = Value.longValue(1L);
+            Timestamp timestamp = Timestamp.fromMillis(1586356695608L);
+            Point point = Point.create(value, timestamp);
+
+            timeSeries = timeSeries.setPoint(point);
         }
 
-        @Test
-        void verifyMeasureNameUsed() {
-            View view = Mockito.mock(View.class);
-            Measure measure = Mockito.mock(Measure.class);
-            when(view.getMeasure()).thenReturn(measure);
-            when(measure.getName()).thenReturn("$%    I am$SPEcial$");
-
-            String result = exporter.getMeasurementName("wrong", view);
-
-            assertThat(result).isEqualTo("i_am_special");
-        }
+        return Metric.createWithOneTimeSeries(metricDescriptor, timeSeries);
     }
 
     @Nested
-    class GetFieldName {
+    class Export {
 
         @Test
-        void cumulativeDoubleIsCounter() {
-            String result = exporter.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, null);
+        public void noMetrics() {
 
-            assertThat(result).isEqualTo("counter");
+            exporter.export();
+
+            verifyNoInteractions(influxDB);
         }
 
         @Test
-        void cumulativeLongIsCounter() {
-            String result = exporter.getFieldName(MetricDescriptor.Type.CUMULATIVE_INT64, null);
+        public void noData() {
+            Metric dummyMetric = createMetric("dummyMetric", MetricDescriptor.Type.CUMULATIVE_INT64);
+            injectMetrics(dummyMetric);
 
-            assertThat(result).isEqualTo("counter");
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            assertThat(pointsCaptor.getValue().getPoints()).isEmpty();
         }
 
         @Test
-        void gaugeDoubleIsValue() {
-            String result = exporter.getFieldName(MetricDescriptor.Type.GAUGE_DOUBLE, null);
+        public void writeData() throws Exception {
+            OpenCensusDummyData dummyData = new OpenCensusDummyData();
+            OpenCensusDummyData.DummyView dummyView = dummyData.addLongView("dummyMetric", "dummyMetric/count", Aggregation.Count.create(), MetricDescriptor.Type.CUMULATIVE_INT64, Collections.singletonList("testTag"));
+            dummyView.setLongData(Collections.singletonList("testValue"), 1L);
+            dummyView.setLongData(Collections.singletonList("testValue2"), 10L);
 
-            assertThat(result).isEqualTo("value");
-        }
+            //injectMetrics(dummyData.getMetrics());
+            //injectView(dummyData.getViews());
 
-        @Test
-        void gaugeLongIsValue() {
-            String result = exporter.getFieldName(MetricDescriptor.Type.GAUGE_INT64, null);
+            Constructor<?>[] constructors = Class.forName("io.opencensus.implcore.stats.MeasureToViewMap").getDeclaredConstructors();
+            Constructor<?> constructor = constructors[0];
+            constructor.setAccessible(true);
+            Object measuretoViewMap = constructor.newInstance();
 
-            assertThat(result).isEqualTo("value");
-        }
+            Field statsManagerField = ViewManagerImpl.class.getDeclaredField("statsManager");
+            statsManagerField.setAccessible(true);
+            Object statsManager = statsManagerField.get(Stats.getViewManager());
 
-        @Test
-        void distributionIsHistogram() {
-            String result = exporter.getFieldName(MetricDescriptor.Type.CUMULATIVE_DISTRIBUTION, null);
+            Field measureToViewMapField = statsManager.getClass().getDeclaredField("measureToViewMap");
+            measureToViewMapField.setAccessible(true);
+            measureToViewMapField.set(statsManager, measuretoViewMap);
 
-            assertThat(result).isEqualTo("histogram");
-        }
+            exporter.export();
 
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
 
-        @Test
-        void verifyViewSuffixUsed() {
-            View view = Mockito.mock(View.class);
-            Measure measure = Mockito.mock(Measure.class);
-            when(view.getMeasure()).thenReturn(measure);
-            when(measure.getName()).thenReturn("$my$metric$$");
-            when(view.getName()).thenReturn(View.Name.create("$my$metric$$Data//Point"));
-
-            String result = exporter.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, view);
-
-            assertThat(result).isEqualTo("data_point");
-        }
-
-        @Test
-        void defaultNameUsedIfViewAndMeasureEqual() {
-            View view = Mockito.mock(View.class);
-            Measure measure = Mockito.mock(Measure.class);
-            when(view.getMeasure()).thenReturn(measure);
-            when(measure.getName()).thenReturn("something");
-            when(view.getName()).thenReturn(View.Name.create("something"));
-
-            String result = exporter.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, view);
-
-            assertThat(result).isEqualTo("counter");
-
+            assertThat(pointsCaptor.getValue().getPoints()).isEmpty();
         }
     }
-
-    @Nested
-    class GetTags {
-
-        @Test
-        void nullValuesRemoved() {
-            List<LabelKey> keys =Arrays.asList(LabelKey.create("a","a"),LabelKey.create("b","b"),LabelKey.create("b","b"));
-            List<LabelValue> values =Arrays.asList(LabelValue.create("a_val"),LabelValue.create(null),LabelValue.create("b_val"));
-
-            Map<String,String> result = exporter.getTags(keys,values);
-            assertThat(result).hasSize(2)
-                    .containsEntry("a","a_val")
-                    .containsEntry("b","b_val");
-        }
-
-    }
-
-    @Nested
-    class GetPointMillis {
-
-        @Test
-        void timesAddedCorrectly() {
-            Timestamp ts = Timestamp.create(42,99009000);
-            io.opencensus.metrics.export.Point pt = Mockito.mock(io.opencensus.metrics.export.Point.class);
-            when(pt.getTimestamp()).thenReturn(ts);
-
-            long result = exporter.getPointMillis(pt);
-            assertThat(result).isEqualTo(42099);
-        }
-    }
-
-
 }
