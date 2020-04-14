@@ -18,7 +18,6 @@ import org.influxdb.dto.BatchPoints;
 import org.influxdb.dto.Point;
 import org.influxdb.dto.Query;
 import org.influxdb.dto.QueryResult;
-import org.msgpack.core.annotations.VisibleForTesting;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
