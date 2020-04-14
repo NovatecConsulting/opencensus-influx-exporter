@@ -1,16 +1,16 @@
 package rocks.inspectit.opencensus.influx;
 
 
-import io.opencensus.common.Timestamp;
-import io.opencensus.metrics.LabelKey;
-import io.opencensus.metrics.LabelValue;
 import io.opencensus.metrics.Metrics;
 import io.opencensus.metrics.export.Distribution;
 import io.opencensus.metrics.export.Metric;
-import io.opencensus.metrics.export.MetricDescriptor;
+import io.opencensus.metrics.export.MetricProducer;
+import io.opencensus.metrics.export.Value;
 import io.opencensus.stats.Stats;
 import io.opencensus.stats.View;
+import lombok.AccessLevel;
 import lombok.Builder;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.influxdb.InfluxDB;
 import org.influxdb.InfluxDBFactory;
@@ -21,6 +21,7 @@ import org.influxdb.dto.QueryResult;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -28,26 +29,36 @@ import java.util.stream.Stream;
 public class InfluxExporter implements AutoCloseable {
 
     private final String url;
+
     private final String user;
+
     private final String password;
 
     private final String database;
+
     private final String retention;
 
+    private boolean createDatabase;
+
+    @Setter(AccessLevel.PACKAGE)
     private InfluxDB influx;
 
-    private boolean createDatabase;
+    @Setter(AccessLevel.PACKAGE)
+    private Supplier<Set<MetricProducer>> metricProducerSupplier;
+
+    @Setter(AccessLevel.PACKAGE)
+    private Supplier<Set<View>> viewSupplier;
 
     /**
      * Creates a new influx Exporter.
      * The export does not export by itself, but instead has to be triggered manually by calling {@link #export()};
      * This can be done periodically for example using {@link java.util.concurrent.ScheduledExecutorService#scheduleAtFixedRate(Runnable, long, long, TimeUnit)}.
      *
-     * @param url The http url of the influx to connect to
-     * @param user the user to use when connecting to influx, can be null
-     * @param password the password to use when connecting to influx, can be null
-     * @param database the influx database to
-     * @param retention the retention policy of the database to write to
+     * @param url            The http url of the influx to connect to
+     * @param user           the user to use when connecting to influx, can be null
+     * @param password       the password to use when connecting to influx, can be null
+     * @param database       the influx database to
+     * @param retention      the retention policy of the database to write to
      * @param createDatabase if true, the exporter will create the specified database with an "autogen" policy when it connects
      */
     @Builder
@@ -58,6 +69,9 @@ public class InfluxExporter implements AutoCloseable {
         this.database = database;
         this.retention = retention;
         this.createDatabase = createDatabase;
+
+        metricProducerSupplier = () -> Metrics.getExportComponent().getMetricProducerManager().getAllMetricProducer();
+        viewSupplier = () -> Stats.getViewManager().getAllExportedViews();
     }
 
     /**
@@ -65,28 +79,41 @@ public class InfluxExporter implements AutoCloseable {
      * No exception is thrown in case of a failure, instead the data is jsut not written and the error is logged.
      */
     public synchronized void export() {
-        List<Metric> metrics = Metrics.getExportComponent().getMetricProducerManager().getAllMetricProducer()
+        List<Metric> metrics = metricProducerSupplier.get()
                 .stream()
-                .flatMap(mp -> mp.getMetrics().stream())
+                .flatMap(metricProducer -> metricProducer.getMetrics().stream())
                 .collect(Collectors.toList());
+
         export(metrics);
     }
 
-    synchronized void export(Collection<Metric> metrics) {
-        Map<String, View> viewsMap = Stats.getViewManager().getAllExportedViews()
+    private synchronized void export(Collection<Metric> metrics) {
+        if (metrics.size() <= 0) {
+            return;
+        }
+
+        Map<String, View> viewsMap = viewSupplier.get()
                 .stream()
-                .collect(Collectors.toMap(v -> v.getName().asString(), v -> v));
+                .collect(Collectors.toMap(view -> view.getName().asString(), view -> view));
+
         connectAndCreateDatabase();
+
         if (influx != null) {
             try {
                 BatchPoints batch = BatchPoints.database(database).retentionPolicy(retention).build();
                 metrics.stream()
-                        .flatMap(m -> {
-                            String metricName = m.getMetricDescriptor().getName();
+                        .flatMap(metric -> {
+                            String metricName = metric.getMetricDescriptor().getName();
                             View view = viewsMap.get(metricName);
-                            return toInfluxPoints(m, getMeasurementName(metricName, view), getFieldName(m.getMetricDescriptor().getType(), view));
+
+                            String measurementName = InfluxUtils.getMeasurementName(metricName, view);
+                            String fieldName = InfluxUtils.getFieldName(metric.getMetricDescriptor().getType(), view);
+
+                            return toInfluxPoints(metric, measurementName, fieldName);
                         })
+                        .filter(Objects::nonNull)
                         .forEach(batch::point);
+
                 influx.write(batch);
             } catch (Exception e) {
                 log.error("Error writing to InfluxDB", e);
@@ -94,72 +121,34 @@ public class InfluxExporter implements AutoCloseable {
         }
     }
 
-    String getMeasurementName(String metricName, View view) {
-        if (view == null) {
-            return sanitizeName(metricName);
-        }
-        String measureName = view.getMeasure().getName();
-        return sanitizeName(measureName);
-    }
-
-    String getFieldName(MetricDescriptor.Type metricType, View view) {
-        if (view == null) {
-            return getDefaultFieldName(metricType);
-        }
-        String measureName = view.getMeasure().getName();
-        String viewName = view.getName().asString();
-        String fieldName = sanitizeName(removeCommonPrefix(viewName, measureName));
-        if (fieldName.isEmpty()) {
-            return getDefaultFieldName(metricType);
-        }
-        return fieldName;
-    }
-
-    private String getDefaultFieldName(MetricDescriptor.Type metricType) {
-        switch (metricType) {
-            case CUMULATIVE_DOUBLE:
-            case CUMULATIVE_INT64:
-                return "counter";
-            case CUMULATIVE_DISTRIBUTION:
-                return "histogram"; // for distributions, "_bucket", "_sum" and "_count" are suffixed
-        }
-        return "value";
-    }
-
-    private String removeCommonPrefix(String str, String prefixStr) {
-        int commonLen = 0;
-        int limit = Math.min(str.length(), prefixStr.length());
-        while (commonLen < limit && str.charAt(commonLen) == prefixStr.charAt(commonLen)) {
-            commonLen++;
-        }
-        return str.substring(commonLen);
-    }
-
-
-    private String sanitizeName(String name) {
-        return name.replaceAll("^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "")
-                .replaceAll("[^a-zA-Z0-9]+", "_")
-                .toLowerCase();
-    }
-
-    private Stream<Point> toInfluxPoints(Metric m, String measurementName, String fieldName) {
-        return m.getTimeSeriesList().stream()
+    private Stream<Point> toInfluxPoints(Metric metric, String measurementName, String fieldName) {
+        return metric.getTimeSeriesList().stream()
                 .flatMap(timeSeries -> {
-                    Map<String, String> tags = getTags(m.getMetricDescriptor().getLabelKeys(), timeSeries.getLabelValues());
+                    Map<String, String> tags = InfluxUtils.createTagMaps(metric.getMetricDescriptor().getLabelKeys(), timeSeries.getLabelValues());
+
                     return timeSeries.getPoints()
                             .stream()
-                            .flatMap(pt -> pt.getValue().match(
-                                    doubleVal -> Stream.of(Point.measurement(measurementName).addField(fieldName, doubleVal)),
-                                    longVal -> Stream.of(Point.measurement(measurementName).addField(fieldName, longVal)),
-                                    distribution -> getDistributionPoints(distribution, measurementName, fieldName),
-                                    null, null)
-                                    .map(ptb -> ptb.time(getPointMillis(pt), TimeUnit.MILLISECONDS))
-                                    .map(ptb -> ptb.tag(tags))
-                                    .map(Point.Builder::build)
-                            );
+                            .flatMap(point -> toInfluxPoint(point, measurementName, fieldName, tags));
                 });
     }
 
+    private Stream<Point> toInfluxPoint(io.opencensus.metrics.export.Point point, String measurementName, String fieldName, Map<String, String> tags) {
+        long pointTime = InfluxUtils.getTimestampOfPoint(point);
+
+        Value pointValue = point.getValue();
+
+        Stream<Point.Builder> builderStream = pointValue.match(
+                doubleValue -> Stream.of(Point.measurement(measurementName).addField(fieldName, doubleValue)),
+                longValue -> Stream.of(Point.measurement(measurementName).addField(fieldName, longValue)),
+                distributionValue -> getDistributionPoints(distributionValue, measurementName, fieldName),
+                null,
+                null);
+
+        return builderStream
+                .map(builder -> builder.time(pointTime, TimeUnit.MILLISECONDS))
+                .map(builder -> builder.tag(tags))
+                .map(Point.Builder::build);
+    }
 
     private Stream<Point.Builder> getDistributionPoints(Distribution distr, String measurementName, String fieldName) {
         String prefix = fieldName.isEmpty() ? "" : fieldName + "_";
@@ -185,25 +174,6 @@ public class InfluxExporter implements AutoCloseable {
         return results.stream();
     }
 
-    Map<String, String> getTags(List<LabelKey> labelKeys, List<LabelValue> labelValues) {
-        Iterator<LabelKey> keys = labelKeys.iterator();
-        Iterator<LabelValue> values = labelValues.iterator();
-        Map<String, String> result = new HashMap<>();
-        while (keys.hasNext() && values.hasNext()) {
-            String value = values.next().getValue();
-            String key = keys.next().getKey();
-            if (value != null && key != null) {
-                result.put(key, value);
-            }
-        }
-        return result;
-    }
-
-    long getPointMillis(io.opencensus.metrics.export.Point pt) {
-        Timestamp timestamp = pt.getTimestamp();
-        return timestamp.getNanos() / 1000 / 1000 + timestamp.getSeconds() * 1000;
-    }
-
     private synchronized void connectAndCreateDatabase() {
         try {
             if (influx == null) {
@@ -227,7 +197,7 @@ public class InfluxExporter implements AutoCloseable {
     }
 
     /**
-     * Closes the underyling influx connection.
+     * Closes the underlying InfluxDB connection.
      * If {@link #export()} is invoked after {@link #close()}, the connection will be opened again.
      */
     @Override
