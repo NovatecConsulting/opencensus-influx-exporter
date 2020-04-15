@@ -114,6 +114,69 @@ public class InfluxExporterTest {
         }
 
         @Test
+        public void writeGaugeData() {
+            Measure measure = createDoubleMeasure("test_measure");
+            createView(measure, "test_measure/last", Aggregation.LastValue.create(), Collections.emptyList());
+            recordData(measure, 99.95D, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<Point> points = pointsCaptor.getValue().getPoints();
+            assertThat(points).hasSize(1);
+
+            Point point = points.get(0);
+            assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+            assertThat(PointUtils.getField(point)).containsExactly(entry("last", 99.95D));
+            assertThat(PointUtils.getTags(point)).isEmpty();
+        }
+
+        @Test
+        public void writeSuccessiveGaugeData() {
+            Measure measure = createDoubleMeasure("test_measure");
+            createView(measure, "test_measure/last", Aggregation.LastValue.create(), Collections.emptyList());
+            recordData(measure, 99.95D, Collections.emptyMap());
+
+            exporter.export();
+
+            recordData(measure, 0.05D, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB, times(2)).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<BatchPoints> values = pointsCaptor.getAllValues();
+            assertThat(values).hasSize(2);
+
+            // first export
+            {
+                List<Point> points = values.get(0).getPoints();
+                assertThat(points).hasSize(1);
+
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("last", 99.95D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            }
+
+            // second export
+            {
+                List<Point> points = values.get(1).getPoints();
+                assertThat(points).hasSize(1);
+
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("last", 0.05D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            }
+        }
+
+        @Test
         public void successiveExports() {
             Measure measure = createLongMeasure("test_measure");
             createView(measure, "test_measure/count", Aggregation.Count.create(), Collections.emptyList());
@@ -195,13 +258,16 @@ public class InfluxExporterTest {
             verifyNoMoreInteractions(influxDB);
 
             List<Point> points = pointsCaptor.getValue().getPoints();
-            assertThat(points).hasSize(4);
+            assertThat(points).hasSize(5);
 
             assertThat(points).anySatisfy((point) -> {
                 assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
-                assertThat(PointUtils.getField(point)).containsOnly(
-                        entry("value_count", 3L),
-                        entry("value_sum", 2387.0D));
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value_count", 3L));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            });
+            assertThat(points).anySatisfy((point) -> {
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("value_sum", 2387.0D));
                 assertThat(PointUtils.getTags(point)).isEmpty();
             });
             assertThat(points).anySatisfy((point) -> {
@@ -407,7 +473,7 @@ public class InfluxExporterTest {
 
             exporter.export();
 
-            recordData(measure, 250L, Collections.emptyMap());
+            recordData(measure, 0L, Collections.emptyMap());
 
             exporter.export();
 
@@ -420,13 +486,16 @@ public class InfluxExporterTest {
             // first export
             {
                 List<Point> points = values.get(0).getPoints();
-                assertThat(points).hasSize(3);
+                assertThat(points).hasSize(4);
 
                 assertThat(points).anySatisfy((point) -> {
                     assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
-                    assertThat(PointUtils.getField(point)).containsOnly(
-                            entry("value_count", 2L),
-                            entry("value_sum", 1050.0D));
+                    assertThat(PointUtils.getField(point)).containsOnly(entry("value_count", 2L));
+                    assertThat(PointUtils.getTags(point)).isEmpty();
+                });
+                assertThat(points).anySatisfy((point) -> {
+                    assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                    assertThat(PointUtils.getField(point)).containsOnly(entry("value_sum", 1050.0D));
                     assertThat(PointUtils.getTags(point)).isEmpty();
                 });
                 assertThat(points).anySatisfy((point) -> {
@@ -444,25 +513,120 @@ public class InfluxExporterTest {
             // second export
             {
                 List<Point> points = values.get(1).getPoints();
-                assertThat(points).hasSize(3);
+                assertThat(points).hasSize(2);
 
                 assertThat(points).anySatisfy((point) -> {
                     assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
-                    assertThat(PointUtils.getField(point)).containsOnly(
-                            entry("value_count", 1L),
-                            entry("value_sum", 250.0D));
+                    assertThat(PointUtils.getField(point)).containsOnly(entry("value_count", 1L));
                     assertThat(PointUtils.getTags(point)).isEmpty();
                 });
+                // sum not written
                 assertThat(points).anySatisfy((point) -> {
                     assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
                     assertThat(PointUtils.getField(point)).containsExactly(entry("value_bucket", 1L));
                     assertThat(PointUtils.getTags(point)).containsExactly(entry("bucket", "(-Inf,500.0]"));
                 });
-                assertThat(points).anySatisfy((point) -> {
-                    assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
-                    assertThat(PointUtils.getField(point)).containsExactly(entry("value_bucket", 0L));
-                    assertThat(PointUtils.getTags(point)).containsExactly(entry("bucket", "(500.0,+Inf)"));
-                });
+                // second bucket not written
+            }
+        }
+
+        @Test
+        public void writeGaugeData() {
+            Measure measure = createDoubleMeasure("test_measure");
+            createView(measure, "test_measure/last", Aggregation.LastValue.create(), Collections.emptyList());
+            recordData(measure, 99.95D, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<Point> points = pointsCaptor.getValue().getPoints();
+            assertThat(points).hasSize(1);
+
+            Point point = points.get(0);
+            assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+            assertThat(PointUtils.getField(point)).containsExactly(entry("last", 99.95D));
+            assertThat(PointUtils.getTags(point)).isEmpty();
+        }
+
+        @Test
+        public void writeSuccessiveGaugeData() {
+            Measure measure = createDoubleMeasure("test_measure");
+            createView(measure, "test_measure/last", Aggregation.LastValue.create(), Collections.emptyList());
+            recordData(measure, 99.95D, Collections.emptyMap());
+
+            exporter.export();
+
+            recordData(measure, 0.05D, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB, times(2)).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<BatchPoints> values = pointsCaptor.getAllValues();
+            assertThat(values).hasSize(2);
+
+            // first export
+            {
+                List<Point> points = values.get(0).getPoints();
+                assertThat(points).hasSize(1);
+
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("last", 99.95D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            }
+
+            // second export
+            {
+                List<Point> points = values.get(1).getPoints();
+                assertThat(points).hasSize(1);
+
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("last", 0.05D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            }
+        }
+
+        @Test
+        public void writeSuccessiveGaugeDataWithoutChange() {
+            Measure measure = createDoubleMeasure("test_measure");
+            createView(measure, "test_measure/last", Aggregation.LastValue.create(), Collections.emptyList());
+            recordData(measure, 99.95D, Collections.emptyMap());
+
+            exporter.export();
+
+            recordData(measure, 99.95D, Collections.emptyMap());
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB, times(2)).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<BatchPoints> values = pointsCaptor.getAllValues();
+            assertThat(values).hasSize(2);
+
+            // first export
+            {
+                List<Point> points = values.get(0).getPoints();
+                assertThat(points).hasSize(1);
+
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("last", 99.95D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
+            }
+
+            // second export
+            {
+                List<Point> points = values.get(1).getPoints();
+                assertThat(points).isEmpty();
             }
         }
     }

@@ -100,19 +100,19 @@ public class InfluxExporter implements AutoCloseable {
     /**
      * See documentation of {@link #export()}.
      *
-     * @param ignoreInflux If this flag is set to true, the data is not written to the InfluxDB. This is mainly used to initialize
-     *                     the statistics cache.
+     * @param dryRun If this flag is set to true, the data is not written to the InfluxDB. This is mainly used to initialize
+     *               the statistics cache.
      */
-    private synchronized void export(boolean ignoreInflux) {
+    private synchronized void export(boolean dryRun) {
         List<Metric> metrics = metricProducerSupplier.get()
                 .stream()
                 .flatMap(metricProducer -> metricProducer.getMetrics().stream())
                 .collect(Collectors.toList());
 
-        export(metrics, ignoreInflux);
+        export(metrics, dryRun);
     }
 
-    private synchronized void export(Collection<Metric> metrics, boolean ignoreInflux) {
+    private synchronized void export(Collection<Metric> metrics, boolean dryRun) {
         if (metrics.size() <= 0) {
             return;
         }
@@ -121,13 +121,14 @@ public class InfluxExporter implements AutoCloseable {
                 .stream()
                 .collect(Collectors.toMap(view -> view.getName().asString(), view -> view));
 
-        if (!ignoreInflux) {
+        if (!dryRun) {
             connectAndCreateDatabase();
         }
 
-        if (influx != null || ignoreInflux) {
+        if (influx != null || dryRun) {
             try {
                 BatchPoints batch = BatchPoints.database(database).retentionPolicy(retention).build();
+
                 metrics.stream()
                         .flatMap(metric -> {
                             String metricName = metric.getMetricDescriptor().getName();
@@ -141,7 +142,7 @@ public class InfluxExporter implements AutoCloseable {
                         .filter(Objects::nonNull)
                         .forEach(batch::point);
 
-                if (!ignoreInflux) {
+                if (!dryRun) {
                     influx.write(batch);
                 }
             } catch (Exception e) {
@@ -157,11 +158,11 @@ public class InfluxExporter implements AutoCloseable {
 
                     return timeSeries.getPoints()
                             .stream()
-                            .flatMap(point -> toInfluxPoint(point, measurementName, fieldName, tags));
+                            .flatMap(point -> toInfluxPoint(point, metric, measurementName, fieldName, tags));
                 });
     }
 
-    private Stream<Point> toInfluxPoint(io.opencensus.metrics.export.Point point, String measurementName, String fieldName, Map<String, String> tags) {
+    private Stream<Point> toInfluxPoint(io.opencensus.metrics.export.Point point, Metric metric, String measurementName, String fieldName, Map<String, String> tags) {
         long pointTime = InfluxUtils.getTimestampOfPoint(point);
 
         Value pointValue = point.getValue();
@@ -175,61 +176,48 @@ public class InfluxExporter implements AutoCloseable {
 
         return builderStream
                 .map(builder -> builder.time(pointTime, TimeUnit.MILLISECONDS))
-                .map(builder -> builder.tag(tags))
                 .map(Point.Builder::build);
     }
 
     private Stream<Point.Builder> transformValue(String measurementName, String fieldName, Map<String, String> tags, Number value) {
-        Optional<Number> processedValue = processValue(measurementName, fieldName, tags, value);
+        Optional<Point.Builder> pointBuilder = createPointBuilder(measurementName, fieldName, tags, value);
+        return pointBuilder.map(Stream::of).orElseGet(Stream::empty);
+    }
 
-        return processedValue.map(number -> Stream.of(Point.measurement(measurementName).addField(fieldName, number)))
-                .orElseGet(Stream::empty);
+    private Optional<Point.Builder> createPointBuilder(String measurementName, String fieldName, Map<String, String> tags, Number value) {
+        Optional<Number> processedValue = processValue(measurementName, fieldName, tags, value);
+        return processedValue.map(number -> Point.measurement(measurementName).addField(fieldName, number).tag(tags));
     }
 
     private Stream<Point.Builder> getDistributionPoints(Distribution distribution, String measurementName, String fieldName, Map<String, String> tags) {
         String prefix = fieldName.isEmpty() ? "" : fieldName + "_";
-        List<Point.Builder> results = new ArrayList<>();
+        List<Optional<Point.Builder>> results = new ArrayList<>();
 
         String countFieldName = prefix + "count";
         String sumFieldName = prefix + "sum";
 
-        Optional<Number> countValue = processValue(measurementName, countFieldName, tags, distribution.getCount());
+        results.add(createPointBuilder(measurementName, countFieldName, tags, distribution.getCount()));
+        results.add(createPointBuilder(measurementName, sumFieldName, tags, distribution.getSum()));
 
-        if (countValue.isPresent()) {
-            Optional<Number> sumValue = processValue(measurementName, sumFieldName, tags, distribution.getSum());
+        // temporary tag map used for cache key generation to prevent multiple map creations
+        HashMap<String, String> tempTagMap = new HashMap<>(tags);
 
-            Point.Builder totalPoint = Point.measurement(measurementName)
-                    .addField(sumFieldName, sumValue.orElse(DOUBLE_ZERO))
-                    .addField(countFieldName, countValue.get());
-            results.add(totalPoint);
+        List<Double> bucketBoundaries = distribution.getBucketOptions().match(ExplicitOptions::getBucketBoundaries, (noOp) -> Collections.emptyList());
+        for (int i = 0; i < distribution.getBuckets().size(); i++) {
+            Distribution.Bucket bucket = distribution.getBuckets().get(i);
 
-            // temporary tag map used for cache key generation to prevent multiple map creations
-            HashMap<String, String> tempTagMap = new HashMap<>(tags);
+            String lowerLimit = i > 0 ? "(" + bucketBoundaries.get(i - 1) : "(-Inf";
+            String upperLimit = i < bucketBoundaries.size() ? bucketBoundaries.get(i) + "]" : "+Inf)";
+            String interval = lowerLimit + "," + upperLimit;
 
-            List<Double> bucketBoundaries = distribution.getBucketOptions().match(ExplicitOptions::getBucketBoundaries, (noOp) -> Collections.emptyList());
-            for (int i = 0; i < distribution.getBuckets().size(); i++) {
-                Distribution.Bucket bucket = distribution.getBuckets().get(i);
+            tempTagMap.put("bucket", interval);
 
-                String lowerLimit = i > 0 ? "(" + bucketBoundaries.get(i - 1) : "(-Inf";
-                String upperLimit = i < bucketBoundaries.size() ? bucketBoundaries.get(i) + "]" : "+Inf)";
-                String interval = lowerLimit + "," + upperLimit;
-
-                tempTagMap.put("bucket", interval);
-
-                Optional<Number> bucketValue = processValue(measurementName, fieldName, tempTagMap, bucket.getCount());
-
-                // in case any element has been added to the distribution the bucket points will always be written, even its difference is 0
-                Point.Builder bucketPoint = Point.measurement(measurementName)
-                        .addField(prefix + "bucket", bucketValue.orElse(LONG_ZERO))
-                        .tag("bucket", interval);
-
-                results.add(bucketPoint);
-            }
-
-            return results.stream();
-        } else {
-            return Stream.empty();
+            results.add(createPointBuilder(measurementName, prefix + "bucket", tempTagMap, bucket.getCount()));
         }
+
+        return results.stream()
+                .filter(Optional::isPresent)
+                .map(Optional::get);
     }
 
     /**
