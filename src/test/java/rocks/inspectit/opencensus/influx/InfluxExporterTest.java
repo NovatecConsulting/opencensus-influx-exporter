@@ -16,6 +16,7 @@ import rocks.inspectit.opencensus.influx.utils.PointUtils;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.Function;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.entry;
@@ -28,12 +29,16 @@ public class InfluxExporterTest {
 
     private InfluxDB influxDB;
 
+    Function<String,String> nameResolver;
+
     @Nested
     class Export {
 
         @BeforeEach
+        @SuppressWarnings("unchecked")
         public void beforeTest() {
             influxDB = mock(InfluxDB.class);
+            nameResolver = (Function<String,String>)mock(Function.class);
 
             exporter = InfluxExporter.builder()
                     .url("")
@@ -43,6 +48,7 @@ public class InfluxExporterTest {
                     .retention("")
                     .createDatabase(false)
                     .exportDifference(false)
+                    .measurementNameProvider(nameResolver)
                     .build();
 
             exporter.setInflux(influxDB);
@@ -89,6 +95,29 @@ public class InfluxExporterTest {
             Point point = points.get(0);
             assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
             assertThat(PointUtils.getField(point)).containsExactly(entry("sum", 100L));
+            assertThat(PointUtils.getTags(point)).isEmpty();
+        }
+
+        @Test
+        public void testCustomNameResolution() {
+            Measure measure = createLongMeasure("test_measure");
+            createView(measure, "foo/bar/my_field", Aggregation.Sum.create(), Collections.emptyList());
+            recordData(measure, 100L, Collections.emptyMap());
+
+            doReturn("foo/bar").when(nameResolver).apply(eq("foo/bar/my_field"));
+
+            exporter.export();
+
+            ArgumentCaptor<BatchPoints> pointsCaptor = ArgumentCaptor.forClass(BatchPoints.class);
+            verify(influxDB).write(pointsCaptor.capture());
+            verifyNoMoreInteractions(influxDB);
+
+            List<Point> points = pointsCaptor.getValue().getPoints();
+            assertThat(points).hasSize(1);
+
+            Point point = points.get(0);
+            assertThat(PointUtils.getMeasurement(point)).isEqualTo("foo_bar");
+            assertThat(PointUtils.getField(point)).containsExactly(entry("my_field", 100L));
             assertThat(PointUtils.getTags(point)).isEmpty();
         }
 

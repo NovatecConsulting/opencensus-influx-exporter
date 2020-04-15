@@ -24,14 +24,10 @@ public class InfluxUtils {
         return sanitizeName(measureName);
     }
 
-    public static String getFieldName(MetricDescriptor.Type metricType, View view) {
-        if (view == null) {
-            return getDefaultFieldName(metricType);
-        }
-        String measureName = view.getMeasure().getName();
-        String viewName = view.getName().asString();
-        String fieldName = sanitizeName(removeCommonPrefix(viewName, measureName));
-        if (fieldName.isEmpty()) {
+    public static String getFieldName(MetricDescriptor.Type metricType, String metricName, String measurementName) {
+        String sanitizedMetricName = sanitizeName(metricName);
+        String fieldName = sanitizeName(removeCommonPrefix(sanitizedMetricName, measurementName));
+        if(fieldName.equals(sanitizedMetricName) ||fieldName.isEmpty()) {
             return getDefaultFieldName(metricType);
         }
         return fieldName;
@@ -63,7 +59,7 @@ public class InfluxUtils {
         return timestamp.getNanos() / 1000 / 1000 + timestamp.getSeconds() * 1000;
     }
 
-    private static String sanitizeName(String name) {
+    static String sanitizeName(String name) {
         return name.replaceAll("^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "")
                 .replaceAll("[^a-zA-Z0-9]+", "_")
                 .toLowerCase();

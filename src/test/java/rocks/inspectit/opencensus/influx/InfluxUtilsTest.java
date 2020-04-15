@@ -47,35 +47,35 @@ class InfluxUtilsTest {
 
         @Test
         void cumulativeDoubleIsCounter() {
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, null);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, "","");
 
             assertThat(result).isEqualTo("counter");
         }
 
         @Test
         void cumulativeLongIsCounter() {
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_INT64, null);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_INT64, "","");
 
             assertThat(result).isEqualTo("counter");
         }
 
         @Test
         void gaugeDoubleIsValue() {
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.GAUGE_DOUBLE, null);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.GAUGE_DOUBLE, "","");
 
             assertThat(result).isEqualTo("value");
         }
 
         @Test
         void gaugeLongIsValue() {
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.GAUGE_INT64, null);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.GAUGE_INT64, "","");
 
             assertThat(result).isEqualTo("value");
         }
 
         @Test
         void distributionIsHistogram() {
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DISTRIBUTION, null);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DISTRIBUTION, "","");
 
             assertThat(result).isEqualTo("histogram");
         }
@@ -83,26 +83,14 @@ class InfluxUtilsTest {
 
         @Test
         void verifyViewSuffixUsed() {
-            View view = Mockito.mock(View.class);
-            Measure measure = Mockito.mock(Measure.class);
-            when(view.getMeasure()).thenReturn(measure);
-            when(measure.getName()).thenReturn("$my$metric$$");
-            when(view.getName()).thenReturn(View.Name.create("$my$metric$$Data//Point"));
-
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, view);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, "$my$metric$$Data//Point","$my$metric$$");
 
             assertThat(result).isEqualTo("data_point");
         }
 
         @Test
         void defaultNameUsedIfViewAndMeasureEqual() {
-            View view = Mockito.mock(View.class);
-            Measure measure = Mockito.mock(Measure.class);
-            when(view.getMeasure()).thenReturn(measure);
-            when(measure.getName()).thenReturn("something");
-            when(view.getName()).thenReturn(View.Name.create("something"));
-
-            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, view);
+            String result = InfluxUtils.getFieldName(MetricDescriptor.Type.CUMULATIVE_DOUBLE, "something", "something");
 
             assertThat(result).isEqualTo("counter");
         }

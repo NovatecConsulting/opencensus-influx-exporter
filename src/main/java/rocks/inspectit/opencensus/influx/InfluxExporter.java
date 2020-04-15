@@ -19,6 +19,7 @@ import org.influxdb.dto.QueryResult;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -44,6 +45,8 @@ public class InfluxExporter implements AutoCloseable {
 
     private boolean exportDifference;
 
+    private Function<String,String> measurementNameProvider;
+
     @Setter(AccessLevel.PACKAGE)
     private InfluxDB influx;
 
@@ -60,15 +63,19 @@ public class InfluxExporter implements AutoCloseable {
      * The export does not export by itself, but instead has to be triggered manually by calling {@link #export()};
      * This can be done periodically for example using {@link java.util.concurrent.ScheduledExecutorService#scheduleAtFixedRate(Runnable, long, long, TimeUnit)}.
      *
-     * @param url            The http url of the influx to connect to
-     * @param user           the user to use when connecting to influx, can be null
-     * @param password       the password to use when connecting to influx, can be null
-     * @param database       the influx database to
-     * @param retention      the retention policy of the database to write to
-     * @param createDatabase if true, the exporter will create the specified database with an "autogen" policy when it connects
+     * @param url                       The http url of the influx to connect to
+     * @param user                      the user to use when connecting to influx, can be null
+     * @param password                  the password to use when connecting to influx, can be null
+     * @param database                  the influx database to
+     * @param retention                 the retention policy of the database to write to
+     * @param createDatabase            if true, the exporter will create the specified database with an "autogen" policy when it connects
+     * @param measurementNameProvider   a function to use for resolving the measurement names for custom metrics.
+     *                                  By default, this is done by finding the measure corresponding to a view.
+     *                                  If this function returns a non-null value, the provided measurement name is used instead.
+     *
      */
     @Builder
-    public InfluxExporter(String url, String user, String password, String database, String retention, boolean createDatabase, boolean exportDifference) {
+    public InfluxExporter(String url, String user, String password, String database, String retention, boolean createDatabase, boolean exportDifference, Function<String,String> measurementNameProvider) {
         this.url = url;
         this.user = user;
         this.password = password;
@@ -76,6 +83,7 @@ public class InfluxExporter implements AutoCloseable {
         this.retention = retention;
         this.createDatabase = createDatabase;
         this.exportDifference = exportDifference;
+        this.measurementNameProvider = measurementNameProvider;
 
         metricProducerSupplier = () -> Metrics.getExportComponent().getMetricProducerManager().getAllMetricProducer();
         viewSupplier = () -> Stats.getViewManager().getAllExportedViews();
@@ -131,8 +139,16 @@ public class InfluxExporter implements AutoCloseable {
                             String metricName = metric.getMetricDescriptor().getName();
                             View view = viewsMap.get(metricName);
 
-                            String measurementName = InfluxUtils.getMeasurementName(metricName, view);
-                            String fieldName = InfluxUtils.getFieldName(metric.getMetricDescriptor().getType(), view);
+                            String measurementName = null;
+                            if(measurementNameProvider != null) {
+                                measurementName = measurementNameProvider.apply(metricName);
+                            }
+                            if(measurementName != null){
+                                measurementName = InfluxUtils.sanitizeName(measurementName);
+                            } else {
+                                measurementName = InfluxUtils.getMeasurementName(metricName, view);
+                            }
+                            String fieldName = InfluxUtils.getFieldName(metric.getMetricDescriptor().getType(), metricName, measurementName);
 
                             return toInfluxPoints(metric, measurementName, fieldName);
                         })
@@ -256,10 +272,14 @@ public class InfluxExporter implements AutoCloseable {
                     influx = InfluxDBFactory.connect(url, user, password);
                 }
                 if (createDatabase) {
-                    QueryResult query = influx.query(new Query("CREATE DATABASE " + database));
-                    String error = query.getError();
-                    if (error != null) {
-                        log.error("Error creating database: {}", error);
+                    try {
+                        QueryResult query = influx.query(new Query("CREATE DATABASE " + database));
+                        String error = query.getError();
+                        if (error != null) {
+                            log.error("Error creating database: {}", error);
+                        }
+                    }catch (Exception e) {
+                        log.error("Error creating database: {}", e);
                     }
                 }
             }
