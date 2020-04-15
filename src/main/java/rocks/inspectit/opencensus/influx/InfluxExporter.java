@@ -2,11 +2,8 @@ package rocks.inspectit.opencensus.influx;
 
 
 import io.opencensus.metrics.Metrics;
-import io.opencensus.metrics.export.Distribution;
+import io.opencensus.metrics.export.*;
 import io.opencensus.metrics.export.Distribution.BucketOptions.ExplicitOptions;
-import io.opencensus.metrics.export.Metric;
-import io.opencensus.metrics.export.MetricProducer;
-import io.opencensus.metrics.export.Value;
 import io.opencensus.stats.Stats;
 import io.opencensus.stats.View;
 import lombok.AccessLevel;
@@ -168,8 +165,8 @@ public class InfluxExporter implements AutoCloseable {
         Value pointValue = point.getValue();
 
         Stream<Point.Builder> builderStream = pointValue.match(
-                doubleValue -> transformValue(measurementName, fieldName, tags, doubleValue),
-                longValue -> transformValue(measurementName, fieldName, tags, longValue),
+                doubleValue -> transformValue(metric, measurementName, fieldName, tags, doubleValue),
+                longValue -> transformValue(metric, measurementName, fieldName, tags, longValue),
                 distributionValue -> getDistributionPoints(distributionValue, measurementName, fieldName, tags),
                 null,
                 null);
@@ -179,13 +176,20 @@ public class InfluxExporter implements AutoCloseable {
                 .map(Point.Builder::build);
     }
 
-    private Stream<Point.Builder> transformValue(String measurementName, String fieldName, Map<String, String> tags, Number value) {
-        Optional<Point.Builder> pointBuilder = createPointBuilder(measurementName, fieldName, tags, value);
+    private Stream<Point.Builder> transformValue(Metric metric, String measurementName, String fieldName, Map<String, String> tags, Number value) {
+        MetricDescriptor.Type type = metric.getMetricDescriptor().getType();
+        boolean isGauge = type == MetricDescriptor.Type.GAUGE_DOUBLE || type == MetricDescriptor.Type.GAUGE_INT64 || type == MetricDescriptor.Type.GAUGE_DISTRIBUTION;
+
+        Optional<Point.Builder> pointBuilder = createPointBuilder(measurementName, fieldName, tags, value, isGauge);
         return pointBuilder.map(Stream::of).orElseGet(Stream::empty);
     }
 
     private Optional<Point.Builder> createPointBuilder(String measurementName, String fieldName, Map<String, String> tags, Number value) {
-        Optional<Number> processedValue = processValue(measurementName, fieldName, tags, value);
+        return createPointBuilder(measurementName, fieldName, tags, value, false);
+    }
+
+    private Optional<Point.Builder> createPointBuilder(String measurementName, String fieldName, Map<String, String> tags, Number value, boolean isGauge) {
+        Optional<Number> processedValue = processValue(isGauge, measurementName, fieldName, tags, value);
         return processedValue.map(number -> Point.measurement(measurementName).addField(fieldName, number).tag(tags));
     }
 
@@ -229,12 +233,16 @@ public class InfluxExporter implements AutoCloseable {
      *
      * @return the value to export for the specified metric
      */
-    private Optional<Number> processValue(String measurementName, String fieldName, Map<String, String> tags, Number value) {
+    private Optional<Number> processValue(boolean isGauge, String measurementName, String fieldName, Map<String, String> tags, Number value) {
         if (exportDifference) {
             Number difference = statsCache.getDifference(measurementName, fieldName, tags, value);
 
-            if (difference.doubleValue() > 0D) {
-                return Optional.of(difference);
+            if (difference.doubleValue() != 0D) {
+                if (isGauge) {
+                    return Optional.of(value);
+                } else {
+                    return Optional.of(difference);
+                }
             } else {
                 return Optional.empty();
             }

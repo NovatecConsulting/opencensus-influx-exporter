@@ -1,5 +1,7 @@
 package rocks.inspectit.opencensus.influx;
 
+import lombok.Value;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -11,13 +13,13 @@ public class StatisticsCache {
     /**
      * Map storing the last metric value for a specific metric.
      */
-    private Map<String, Number> valueMap = new HashMap<>();
+    private Map<CacheKey, Number> valueMap = new HashMap<>();
 
     /**
      * @return the change of a metric since the last invocation of this method
      */
     public Number getDifference(String measurementName, String fieldName, Map<String, String> tags, Number value) {
-        String cacheKey = cacheKey(measurementName, fieldName, tags);
+        CacheKey cacheKey = createCacheKey(measurementName, fieldName, tags);
 
         Number latestValue = valueMap.put(cacheKey, value);
 
@@ -36,16 +38,18 @@ public class StatisticsCache {
     }
 
     /**
-     * This method generates a key used for caching the values.
-     * The following shows example keys:
-     * <p><ul>
-     * <li>test_measure/value_count/{}
-     * <li>test_measure/value/{another_tag=my_second_value}
-     * </ul><p>
-     *
      * @return the key which is used for caching the last metric value
      */
-    private String cacheKey(String measurementName, String fieldName, Map<String, String> tag) {
-        return measurementName + "/" + fieldName + "/" + tag.toString();
+    private CacheKey createCacheKey(String measurementName, String fieldName, Map<String, String> tags) {
+        return new CacheKey(measurementName, fieldName, new HashMap<>(tags));
+    }
+
+    @Value
+    private static class CacheKey {
+        private String measurementName;
+
+        private String fieldName;
+
+        private Map<String, String> tag;
     }
 }
