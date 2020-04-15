@@ -625,8 +625,13 @@ public class InfluxExporterTest {
 
             // second export
             {
-                List<Point> points = values.get(1).getPoints();
-                assertThat(points).isEmpty();
+                List<Point> points = values.get(0).getPoints();
+                assertThat(points).hasSize(1);
+
+                Point point = points.get(0);
+                assertThat(PointUtils.getMeasurement(point)).isEqualTo("test_measure");
+                assertThat(PointUtils.getField(point)).containsExactly(entry("last", 99.95D));
+                assertThat(PointUtils.getTags(point)).isEmpty();
             }
         }
     }

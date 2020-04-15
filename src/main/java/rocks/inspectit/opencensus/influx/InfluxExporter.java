@@ -234,15 +234,11 @@ public class InfluxExporter implements AutoCloseable {
      * @return the value to export for the specified metric
      */
     private Optional<Number> processValue(boolean isGauge, String measurementName, String fieldName, Map<String, String> tags, Number value) {
-        if (exportDifference) {
+        if (exportDifference && !isGauge) {
             Number difference = statsCache.getDifference(measurementName, fieldName, tags, value);
 
             if (difference.doubleValue() != 0D) {
-                if (isGauge) {
-                    return Optional.of(value);
-                } else {
-                    return Optional.of(difference);
-                }
+                return Optional.of(difference);
             } else {
                 return Optional.empty();
             }
