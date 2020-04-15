@@ -3,6 +3,7 @@ package rocks.inspectit.opencensus.influx;
 
 import io.opencensus.metrics.Metrics;
 import io.opencensus.metrics.export.Distribution;
+import io.opencensus.metrics.export.Distribution.BucketOptions.ExplicitOptions;
 import io.opencensus.metrics.export.Metric;
 import io.opencensus.metrics.export.MetricProducer;
 import io.opencensus.metrics.export.Value;
@@ -28,6 +29,10 @@ import java.util.stream.Stream;
 @Slf4j
 public class InfluxExporter implements AutoCloseable {
 
+    private static final Number LONG_ZERO = 0L;
+
+    private static final Number DOUBLE_ZERO = 0D;
+
     private final String url;
 
     private final String user;
@@ -40,8 +45,12 @@ public class InfluxExporter implements AutoCloseable {
 
     private boolean createDatabase;
 
+    private boolean exportDifference;
+
     @Setter(AccessLevel.PACKAGE)
     private InfluxDB influx;
+
+    private StatisticsCache statsCache;
 
     @Setter(AccessLevel.PACKAGE)
     private Supplier<Set<MetricProducer>> metricProducerSupplier;
@@ -62,32 +71,48 @@ public class InfluxExporter implements AutoCloseable {
      * @param createDatabase if true, the exporter will create the specified database with an "autogen" policy when it connects
      */
     @Builder
-    public InfluxExporter(String url, String user, String password, String database, String retention, boolean createDatabase) {
+    public InfluxExporter(String url, String user, String password, String database, String retention, boolean createDatabase, boolean exportDifference) {
         this.url = url;
         this.user = user;
         this.password = password;
         this.database = database;
         this.retention = retention;
         this.createDatabase = createDatabase;
+        this.exportDifference = exportDifference;
 
         metricProducerSupplier = () -> Metrics.getExportComponent().getMetricProducerManager().getAllMetricProducer();
         viewSupplier = () -> Stats.getViewManager().getAllExportedViews();
+
+        if (exportDifference) {
+            statsCache = new StatisticsCache();
+            export(true);
+        }
     }
 
     /**
      * Fetches all metrics from OpenCensus and attempts to export them to Influx.
-     * No exception is thrown in case of a failure, instead the data is jsut not written and the error is logged.
+     * No exception is thrown in case of a failure, instead the data is just not written and the error is logged.
      */
     public synchronized void export() {
+        export(false);
+    }
+
+    /**
+     * See documentation of {@link #export()}.
+     *
+     * @param ignoreInflux If this flag is set to true, the data is not written to the InfluxDB. This is mainly used to initialize
+     *                     the statistics cache.
+     */
+    private synchronized void export(boolean ignoreInflux) {
         List<Metric> metrics = metricProducerSupplier.get()
                 .stream()
                 .flatMap(metricProducer -> metricProducer.getMetrics().stream())
                 .collect(Collectors.toList());
 
-        export(metrics);
+        export(metrics, ignoreInflux);
     }
 
-    private synchronized void export(Collection<Metric> metrics) {
+    private synchronized void export(Collection<Metric> metrics, boolean ignoreInflux) {
         if (metrics.size() <= 0) {
             return;
         }
@@ -96,9 +121,11 @@ public class InfluxExporter implements AutoCloseable {
                 .stream()
                 .collect(Collectors.toMap(view -> view.getName().asString(), view -> view));
 
-        connectAndCreateDatabase();
+        if (!ignoreInflux) {
+            connectAndCreateDatabase();
+        }
 
-        if (influx != null) {
+        if (influx != null || ignoreInflux) {
             try {
                 BatchPoints batch = BatchPoints.database(database).retentionPolicy(retention).build();
                 metrics.stream()
@@ -114,7 +141,9 @@ public class InfluxExporter implements AutoCloseable {
                         .filter(Objects::nonNull)
                         .forEach(batch::point);
 
-                influx.write(batch);
+                if (!ignoreInflux) {
+                    influx.write(batch);
+                }
             } catch (Exception e) {
                 log.error("Error writing to InfluxDB", e);
             }
@@ -138,9 +167,9 @@ public class InfluxExporter implements AutoCloseable {
         Value pointValue = point.getValue();
 
         Stream<Point.Builder> builderStream = pointValue.match(
-                doubleValue -> Stream.of(Point.measurement(measurementName).addField(fieldName, doubleValue)),
-                longValue -> Stream.of(Point.measurement(measurementName).addField(fieldName, longValue)),
-                distributionValue -> getDistributionPoints(distributionValue, measurementName, fieldName),
+                doubleValue -> transformValue(measurementName, fieldName, tags, doubleValue),
+                longValue -> transformValue(measurementName, fieldName, tags, longValue),
+                distributionValue -> getDistributionPoints(distributionValue, measurementName, fieldName, tags),
                 null,
                 null);
 
@@ -150,28 +179,80 @@ public class InfluxExporter implements AutoCloseable {
                 .map(Point.Builder::build);
     }
 
-    private Stream<Point.Builder> getDistributionPoints(Distribution distr, String measurementName, String fieldName) {
+    private Stream<Point.Builder> transformValue(String measurementName, String fieldName, Map<String, String> tags, Number value) {
+        Optional<Number> processedValue = processValue(measurementName, fieldName, tags, value);
+
+        return processedValue.map(number -> Stream.of(Point.measurement(measurementName).addField(fieldName, number)))
+                .orElseGet(Stream::empty);
+    }
+
+    private Stream<Point.Builder> getDistributionPoints(Distribution distribution, String measurementName, String fieldName, Map<String, String> tags) {
         String prefix = fieldName.isEmpty() ? "" : fieldName + "_";
         List<Point.Builder> results = new ArrayList<>();
-        results.add(
-                Point.measurement(measurementName)
-                        .addField(prefix + "sum", distr.getSum())
-                        .addField(prefix + "count", distr.getCount())
-        );
-        List<Double> bucketBoundaries =
-                distr.getBucketOptions().match(Distribution.BucketOptions.ExplicitOptions::getBucketBoundaries, (noOp) -> Collections.emptyList());
-        for (int i = 0; i < distr.getBuckets().size(); i++) {
-            Distribution.Bucket bucket = distr.getBuckets().get(i);
-            String lowerLimit = i > 0 ? "(" + bucketBoundaries.get(i - 1) : "(-Inf";
-            String upperLimit = i < bucketBoundaries.size() ? bucketBoundaries.get(i) + "]" : "+Inf)";
-            String interval = lowerLimit + "," + upperLimit;
-            results.add(
-                    Point.measurement(measurementName)
-                            .addField(prefix + "bucket", bucket.getCount())
-                            .tag("bucket", interval)
-            );
+
+        String countFieldName = prefix + "count";
+        String sumFieldName = prefix + "sum";
+
+        Optional<Number> countValue = processValue(measurementName, countFieldName, tags, distribution.getCount());
+
+        if (countValue.isPresent()) {
+            Optional<Number> sumValue = processValue(measurementName, sumFieldName, tags, distribution.getSum());
+
+            Point.Builder totalPoint = Point.measurement(measurementName)
+                    .addField(sumFieldName, sumValue.orElse(DOUBLE_ZERO))
+                    .addField(countFieldName, countValue.get());
+            results.add(totalPoint);
+
+            // temporary tag map used for cache key generation to prevent multiple map creations
+            HashMap<String, String> tempTagMap = new HashMap<>(tags);
+
+            List<Double> bucketBoundaries = distribution.getBucketOptions().match(ExplicitOptions::getBucketBoundaries, (noOp) -> Collections.emptyList());
+            for (int i = 0; i < distribution.getBuckets().size(); i++) {
+                Distribution.Bucket bucket = distribution.getBuckets().get(i);
+
+                String lowerLimit = i > 0 ? "(" + bucketBoundaries.get(i - 1) : "(-Inf";
+                String upperLimit = i < bucketBoundaries.size() ? bucketBoundaries.get(i) + "]" : "+Inf)";
+                String interval = lowerLimit + "," + upperLimit;
+
+                tempTagMap.put("bucket", interval);
+
+                Optional<Number> bucketValue = processValue(measurementName, fieldName, tempTagMap, bucket.getCount());
+
+                // in case any element has been added to the distribution the bucket points will always be written, even its difference is 0
+                Point.Builder bucketPoint = Point.measurement(measurementName)
+                        .addField(prefix + "bucket", bucketValue.orElse(LONG_ZERO))
+                        .tag("bucket", interval);
+
+                results.add(bucketPoint);
+            }
+
+            return results.stream();
+        } else {
+            return Stream.empty();
         }
-        return results.stream();
+    }
+
+    /**
+     * Processes the value for the specified field/measure. In case the exporter is exporting the metric difference this
+     * method will return the difference of the value compared to the last value. If the metric has not been changed, the
+     * result will be empty.
+     * In case the exporter is not exporting the difference but the actual value, this method will always return the
+     * given value.
+     *
+     * @return the value to export for the specified metric
+     */
+    private Optional<Number> processValue(String measurementName, String fieldName, Map<String, String> tags, Number value) {
+        if (exportDifference) {
+            Number difference = statsCache.getDifference(measurementName, fieldName, tags, value);
+
+            if (difference.doubleValue() > 0D) {
+                return Optional.of(difference);
+            } else {
+                return Optional.empty();
+            }
+        } else {
+            return Optional.of(value);
+        }
     }
 
     private synchronized void connectAndCreateDatabase() {
