@@ -16,18 +16,17 @@ public class InfluxUtils {
     private InfluxUtils() {
     }
 
-    public static String getMeasurementName(String metricName, View view) {
+    public static String getRawMeasurementName(String metricName, View view) {
         if (view == null) {
-            return sanitizeName(metricName);
+            return metricName;
         }
-        String measureName = view.getMeasure().getName();
-        return sanitizeName(measureName);
+        return view.getMeasure().getName();
     }
 
-    public static String getFieldName(MetricDescriptor.Type metricType, String metricName, String measurementName) {
-        String sanitizedMetricName = sanitizeName(metricName);
-        String fieldName = sanitizeName(removeCommonPrefix(sanitizedMetricName, measurementName));
-        if(fieldName.equals(sanitizedMetricName) ||fieldName.isEmpty()) {
+    public static String getRawFieldName(MetricDescriptor.Type metricType, String rawMetricName, String rawMeasurementName) {
+        String fieldName = removeCommonPrefix(rawMetricName, rawMeasurementName);
+        String sanitizedFieldName = sanitizeName(fieldName);
+        if (sanitizedFieldName.isEmpty()) {
             return getDefaultFieldName(metricType);
         }
         return fieldName;

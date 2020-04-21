@@ -25,11 +25,11 @@ import static rocks.inspectit.opencensus.influx.utils.OpenCensusUtils.*;
 
 public class InfluxExporterTest {
 
+    Function<String, String> nameResolver;
+
     private InfluxExporter exporter;
 
     private InfluxDB influxDB;
-
-    Function<String,String> nameResolver;
 
     @Nested
     class Export {
@@ -38,7 +38,7 @@ public class InfluxExporterTest {
         @SuppressWarnings("unchecked")
         public void beforeTest() {
             influxDB = mock(InfluxDB.class);
-            nameResolver = (Function<String,String>)mock(Function.class);
+            nameResolver = (Function<String, String>) mock(Function.class);
 
             exporter = InfluxExporter.builder()
                     .url("")
