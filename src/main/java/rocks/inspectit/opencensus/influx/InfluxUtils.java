@@ -16,22 +16,17 @@ public class InfluxUtils {
     private InfluxUtils() {
     }
 
-    public static String getMeasurementName(String metricName, View view) {
+    public static String getRawMeasurementName(String metricName, View view) {
         if (view == null) {
-            return sanitizeName(metricName);
+            return metricName;
         }
-        String measureName = view.getMeasure().getName();
-        return sanitizeName(measureName);
+        return view.getMeasure().getName();
     }
 
-    public static String getFieldName(MetricDescriptor.Type metricType, View view) {
-        if (view == null) {
-            return getDefaultFieldName(metricType);
-        }
-        String measureName = view.getMeasure().getName();
-        String viewName = view.getName().asString();
-        String fieldName = sanitizeName(removeCommonPrefix(viewName, measureName));
-        if (fieldName.isEmpty()) {
+    public static String getRawFieldName(MetricDescriptor.Type metricType, String rawMetricName, String rawMeasurementName) {
+        String fieldName = removeCommonPrefix(rawMetricName, rawMeasurementName);
+        String sanitizedFieldName = sanitizeName(fieldName);
+        if (sanitizedFieldName.isEmpty()) {
             return getDefaultFieldName(metricType);
         }
         return fieldName;
@@ -63,7 +58,7 @@ public class InfluxUtils {
         return timestamp.getNanos() / 1000 / 1000 + timestamp.getSeconds() * 1000;
     }
 
-    private static String sanitizeName(String name) {
+    static String sanitizeName(String name) {
         return name.replaceAll("^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$", "")
                 .replaceAll("[^a-zA-Z0-9]+", "_")
                 .toLowerCase();
