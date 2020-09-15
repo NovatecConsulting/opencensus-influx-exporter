@@ -299,7 +299,7 @@ public class InfluxExporter implements AutoCloseable {
             writeBatch(batch);
         } catch(Exception e) {
             if(failedBatches.offer(batch)) {
-                log.warn("Failed to write new data to influx, but keeping it in-memory until the next attempt.", e);
+                log.warn("Failed to write new data to influx, but keeping it in-memory until the next attempt: {}", e);
             } else {
                 failedBatches.poll(); //remove and drop oldest value
                 failedBatches.offer(batch);
@@ -313,7 +313,7 @@ public class InfluxExporter implements AutoCloseable {
                 writeBatch(failedBatches.peek());
                 failedBatches.poll(); //remove on success
             } catch (Exception e) {
-                log.warn("Failed to write buffered data to influx, but keeping it in-memory until the next attempt.", e);
+                log.warn("Failed to write buffered data to influx, but keeping it in-memory until the next attempt: {}", e);
             }
         }
     }
