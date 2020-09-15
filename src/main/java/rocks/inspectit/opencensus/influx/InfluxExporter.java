@@ -15,8 +15,10 @@ import org.influxdb.dto.BatchPoints;
 import org.influxdb.dto.Point;
 import org.influxdb.dto.Query;
 import org.influxdb.dto.QueryResult;
+import org.msgpack.core.annotations.VisibleForTesting;
 
 import java.util.*;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -57,6 +59,8 @@ public class InfluxExporter implements AutoCloseable {
     @Setter(AccessLevel.PACKAGE)
     private Supplier<Set<View>> viewSupplier;
 
+    private ArrayBlockingQueue<BatchPoints> failedBatches;
+
     /**
      * Creates a new influx Exporter.
      * The export does not export by itself, but instead has to be triggered manually by calling {@link #export()};
@@ -71,9 +75,13 @@ public class InfluxExporter implements AutoCloseable {
      * @param measurementNameProvider a function to use for resolving the measurement names for custom metrics.
      *                                By default, this is done by finding the measure corresponding to a view.
      *                                If this function returns a non-null value, the provided measurement name is used instead.
+     * @param bufferSize              When the influx cannot be reached, the data will be placed in a buffer instead.
+     *                                This parameter specifies the maximum number of batches to keep in memory.
      */
     @Builder
-    public InfluxExporter(String url, String user, String password, String database, String retention, boolean createDatabase, boolean exportDifference, Function<String, String> measurementNameProvider) {
+    public InfluxExporter(String url, String user, String password, String database, String retention, boolean createDatabase,
+                          boolean exportDifference, Function<String, String> measurementNameProvider,
+                          int bufferSize) {
         this.url = url;
         this.user = user;
         this.password = password;
@@ -90,6 +98,7 @@ public class InfluxExporter implements AutoCloseable {
             statsCache = new StatisticsCache();
             export(true);
         }
+        failedBatches = new ArrayBlockingQueue<>(bufferSize);
     }
 
     /**
@@ -121,36 +130,26 @@ public class InfluxExporter implements AutoCloseable {
         }
 
         Map<String, View> viewsMap = viewSupplier.get()
-                .stream()
-                .collect(Collectors.toMap(view -> view.getName().asString(), view -> view));
+        .stream()
+        .collect(Collectors.toMap(view -> view.getName().asString(), view -> view));
+
+        BatchPoints batch = BatchPoints.database(database).retentionPolicy(retention).build();
+
+        metrics.stream()
+                .flatMap(metric -> {
+                    String metricName = metric.getMetricDescriptor().getName();
+
+                    String measurementName = getMeasurementName(viewsMap, metricName);
+                    String fieldName = InfluxUtils.getRawFieldName(metric.getMetricDescriptor()
+                            .getType(), metricName, measurementName);
+
+                    return toInfluxPoints(metric, InfluxUtils.sanitizeName(measurementName), InfluxUtils.sanitizeName(fieldName));
+                })
+                .filter(Objects::nonNull)
+                .forEach(batch::point);
 
         if (!dryRun) {
-            connectAndCreateDatabase();
-        }
-
-        if (influx != null || dryRun) {
-            try {
-                BatchPoints batch = BatchPoints.database(database).retentionPolicy(retention).build();
-
-                metrics.stream()
-                        .flatMap(metric -> {
-                            String metricName = metric.getMetricDescriptor().getName();
-
-                            String measurementName = getMeasurementName(viewsMap, metricName);
-                            String fieldName = InfluxUtils.getRawFieldName(metric.getMetricDescriptor()
-                                    .getType(), metricName, measurementName);
-
-                            return toInfluxPoints(metric, InfluxUtils.sanitizeName(measurementName), InfluxUtils.sanitizeName(fieldName));
-                        })
-                        .filter(Objects::nonNull)
-                        .forEach(batch::point);
-
-                if (!dryRun) {
-                    influx.write(batch);
-                }
-            } catch (Exception e) {
-                log.error("Error writing to InfluxDB", e);
-            }
+            exportOrBufferBatch(batch);
         }
     }
 
@@ -267,7 +266,7 @@ public class InfluxExporter implements AutoCloseable {
         }
     }
 
-    private synchronized void connectAndCreateDatabase() {
+    private synchronized void connectAndCreateDatabase(){
         try {
             if (influx == null) {
                 if (user == null || password == null) {
@@ -287,10 +286,41 @@ public class InfluxExporter implements AutoCloseable {
                     }
                 }
             }
-        } catch (Throwable t) {
+        } catch (RuntimeException e) {
             influx = null;
-            log.error("Could not connect to InfluxDB", t);
+            throw e;
         }
+    }
+
+
+    @VisibleForTesting
+    void exportOrBufferBatch(BatchPoints batch) {
+        try {
+            writeBatch(batch);
+        } catch(Exception e) {
+            if(failedBatches.offer(batch)) {
+                log.warn("Failed to write new data to influx, but keeping it in-memory until the next attempt.", e);
+            } else {
+                failedBatches.poll(); //remove and drop oldest value
+                failedBatches.offer(batch);
+                log.error("Failed to write new data to influx, dropping data because buffer is full!.", e);
+            }
+            return;
+        }
+        //write buffered data
+        if(!failedBatches.isEmpty()) {
+            try {
+                writeBatch(failedBatches.peek());
+                failedBatches.poll(); //remove on success
+            } catch (Exception e) {
+                log.warn("Failed to write buffered data to influx, but keeping it in-memory until the next attempt.", e);
+            }
+        }
+    }
+
+    private void writeBatch(BatchPoints batch) {
+        connectAndCreateDatabase();
+        influx.write(batch);
     }
 
     /**
