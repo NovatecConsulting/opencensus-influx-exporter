@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import rocks.inspectit.opencensus.influx.utils.PointUtils;
 
 import java.util.Arrays;
@@ -49,6 +50,7 @@ public class InfluxExporterTest {
                     .createDatabase(false)
                     .exportDifference(false)
                     .measurementNameProvider(nameResolver)
+                    .bufferSize(1)
                     .build();
 
             exporter.setInflux(influxDB);
@@ -334,6 +336,7 @@ public class InfluxExporterTest {
                     .retention("")
                     .createDatabase(false)
                     .exportDifference(true)
+                    .bufferSize(1)
                     .build();
 
             exporter.setInflux(influxDB);
@@ -355,6 +358,7 @@ public class InfluxExporterTest {
                     .retention("")
                     .createDatabase(false)
                     .exportDifference(true)
+                    .bufferSize(1)
                     .build();
             exporter.setInflux(influxDB);
 
@@ -663,5 +667,138 @@ public class InfluxExporterTest {
                 assertThat(PointUtils.getTags(point)).isEmpty();
             }
         }
+    }
+
+    @Nested
+    class ExportOrBufferBatch {
+
+        @BeforeEach
+        @SuppressWarnings("unchecked")
+        public void beforeTest() {
+            influxDB = mock(InfluxDB.class);
+            nameResolver = (Function<String, String>) mock(Function.class);
+
+            exporter = InfluxExporter.builder()
+                    .url("")
+                    .user("")
+                    .password("")
+                    .database("")
+                    .retention("")
+                    .createDatabase(false)
+                    .exportDifference(false)
+                    .measurementNameProvider(nameResolver)
+                    .bufferSize(2)
+                    .build();
+
+            exporter.setInflux(influxDB);
+        }
+
+
+        @Test
+        public void noFailure() {
+            BatchPoints first = Mockito.mock(BatchPoints.class);
+            BatchPoints second = Mockito.mock(BatchPoints.class);
+
+            //first attempt should fail
+            doNothing().when(influxDB).write(first);
+            doNothing().when(influxDB).write(second);
+
+            exporter.exportOrBufferBatch(first);
+
+            verify(influxDB).write(first);
+
+            exporter.exportOrBufferBatch(second);
+            verify(influxDB).write(first);
+            verify(influxDB).write(second);
+        }
+
+        @Test
+        public void singleFailure() {
+            BatchPoints first = Mockito.mock(BatchPoints.class);
+            BatchPoints second = Mockito.mock(BatchPoints.class);
+
+            //first attempt should fail
+            doThrow(new RuntimeException("Some Failure")).doNothing().when(influxDB).write(first);
+            doNothing().when(influxDB).write(second);
+
+            exporter.exportOrBufferBatch(first);
+
+            verify(influxDB).write(first);
+
+            exporter.exportOrBufferBatch(second);
+            verify(influxDB, times(2)).write(first);
+            verify(influxDB).write(second);
+            verifyNoMoreInteractions(influxDB);
+        }
+
+
+        @Test
+        public void repetitionFailure() {
+            BatchPoints first = Mockito.mock(BatchPoints.class);
+            BatchPoints second = Mockito.mock(BatchPoints.class);
+            BatchPoints third = Mockito.mock(BatchPoints.class);
+
+            //first attempt should fail
+            RuntimeException exc = new RuntimeException("Some Failure");
+            doThrow(exc).doThrow(exc).doNothing().when(influxDB).write(first);
+            doNothing().when(influxDB).write(second);
+            doNothing().when(influxDB).write(third);
+
+            exporter.exportOrBufferBatch(first);
+            verify(influxDB).write(first);
+            verifyNoMoreInteractions(influxDB);
+
+            exporter.exportOrBufferBatch(second);
+            verify(influxDB, times(2)).write(first);
+            verify(influxDB).write(second);
+            verifyNoMoreInteractions(influxDB);
+
+            exporter.exportOrBufferBatch(third);
+            verify(influxDB, times(3)).write(first);
+            verify(influxDB).write(third);
+            verifyNoMoreInteractions(influxDB);
+        }
+
+
+        @Test
+        public void bufferExceedFailure() {
+            BatchPoints first = Mockito.mock(BatchPoints.class);
+            BatchPoints second = Mockito.mock(BatchPoints.class);
+            BatchPoints third = Mockito.mock(BatchPoints.class);
+            BatchPoints fourth = Mockito.mock(BatchPoints.class);
+            BatchPoints fifth = Mockito.mock(BatchPoints.class);
+
+            //first attempt should fail
+            RuntimeException exc = new RuntimeException("Some Failure");
+            doThrow(exc).doNothing().when(influxDB).write(first);
+            doThrow(exc).doNothing().when(influxDB).write(second);
+            doThrow(exc).doNothing().when(influxDB).write(third);
+            doNothing().when(influxDB).write(fourth);
+            doNothing().when(influxDB).write(fifth);
+
+            exporter.exportOrBufferBatch(first);
+            verify(influxDB).write(first);
+            verifyNoMoreInteractions(influxDB);
+
+            exporter.exportOrBufferBatch(second);
+            verify(influxDB).write(second);
+            verifyNoMoreInteractions(influxDB);
+
+            exporter.exportOrBufferBatch(third);
+            verify(influxDB).write(third);
+            verifyNoMoreInteractions(influxDB);
+
+            exporter.exportOrBufferBatch(fourth);
+            verify(influxDB, times(2)).write(second);
+            verify(influxDB).write(fourth);
+            verifyNoMoreInteractions(influxDB);
+
+            exporter.exportOrBufferBatch(fifth);
+            verify(influxDB, times(2)).write(third);
+            verify(influxDB).write(fifth);
+            verifyNoMoreInteractions(influxDB);
+        }
+
+
     }
 }
